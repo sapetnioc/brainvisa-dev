@@ -74,6 +74,7 @@ lark-parser = ">0.7.0"
 python-dateutil = "*"
 requests = "*"
 cryptography = "*"
+git-subrepo = "*"
 
 [dependencies.libjpeg-turbo]
 channel = "conda-forge"
