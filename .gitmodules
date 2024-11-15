@@ -1,0 +1,8 @@
+[submodule "src/brainvisa-cmake"]
+	path = src/brainvisa-cmake
+	url = https://github.com/brainvisa/brainvisa-cmake
+	branch = master
+[submodule "src/soma-io"]
+	path = src/soma-io
+	url = https://github.com/brainvisa/soma-io.git
+	branch = master
