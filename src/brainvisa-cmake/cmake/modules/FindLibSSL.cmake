@@ -1,0 +1,38 @@
+# Find LibSSL
+#
+# LIBSSL_FOUND
+# LIBSSL_LIBRARIES - ssl and crypto libraries
+
+IF(LIBSSL_LIBRARIES)
+  # already found  
+  SET(LIBSSL_FOUND TRUE)
+ELSE()
+  FIND_LIBRARY( OPENSSL_LIBRARY ssl )
+  FIND_LIBRARY( CRYPTO_LIBRARY crypto )
+  if(NOT OPENSSL_LIBRARY)
+    file( GLOB OPENSSL_LIBRARY /usr/lib/libssl.so.* )
+  endif()
+  if(NOT CRYPTO_LIBRARY)
+    file( GLOB CRYPTO_LIBRARY /usr/lib/libcrypto.so.* )
+  endif()
+
+  IF(OPENSSL_LIBRARY AND CRYPTO_LIBRARY)
+    SET(LIBSSL_LIBRARIES ${OPENSSL_LIBRARY} "${CRYPTO_LIBRARY}")
+    SET(LIBSSL_LIBRARIES ${LIBSSL_LIBRARIES} CACHE PATH "LibSSL libraries")
+    unset(OPENSSL_LIBRARY CACHE)
+    unset(CRYPTO_LIBRARY CACHE)
+    SET(LIBSSL_FOUND TRUE)
+  ELSE()
+    SET(LIBSSL_FOUND FALSE)
+      
+    IF( LIBSSL_FIND_REQUIRED )
+        MESSAGE( SEND_ERROR "LIBSSL was not found." )
+    ELSE()
+      IF(NOT LIBSSL_FIND_QUIETLY)
+        MESSAGE(STATUS "LIBSSL was not found.")
+      ENDIF()
+    ENDIF()
+  ENDIF()
+
+ENDIF()
+

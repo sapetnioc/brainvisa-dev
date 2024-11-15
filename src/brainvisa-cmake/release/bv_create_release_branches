@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import logging
+import os
+import shlex
+import sys
+
+from brainvisa_cmake.components_definition import components_definition
+from brainvisa_cmake.git import GitRepository, GitUpdateError
+from brainvisa_cmake.release import user_confirms
+from brainvisa_cmake.release import get_source_version_tuple
+from brainvisa_cmake.release import set_source_version_tuple
+from brainvisa_cmake.release import set_version_number_and_commit
+
+
+logger = logging.getLogger(__name__)
+
+
+def iterate_master_branch_git_repositories(distro):
+    """Iterate through repositories of the given distro on the release branch.
+
+    The generator yields tuples in the form: (local_path, repo_url, branch):
+
+    - local_path is the local path to the repository, relative to the root of
+      the source directory
+    - url is the URL of the Git repository
+    - branch is the name of the release branch for that repository
+    (typically {major}.{minor} or brainvisa-{major}.{minor}).
+    """
+    for category_name, category_contents in components_definition:
+        for component_name, component_dict in category_contents['components']:
+            if distro in component_dict['groups']:
+                # 'bug_fix' is synonymous with 'master'
+                if 'bug_fix' in component_dict['branches']:
+                    repo_string, local_path = (
+                        component_dict['branches']['bug_fix']
+                    )
+                    repo_info = repo_string.split()
+                    if repo_info[0] == 'git':
+                        yield (
+                            local_path,
+                            repo_info[1],
+                            repo_info[2].split(':')[1],
+                        )
+                    else:
+                        logger.warning('Non-Git repository of type %s at %s '
+                                       'will need to be handled manually.',
+                                       repo_info[0], local_path)
+
+
+def bv_create_release_branches(source_root, new_branch_version, *,
+                               distro='cea', dry_run=True):
+    # Parse the version_to_tag
+    major, minor = new_branch_version.split('.')
+    major = int(major)
+    minor = int(minor)
+    assert new_branch_version == f'{major:d}.{minor:d}'
+
+    for local_path, repo_url, branch in iterate_master_branch_git_repositories(
+            distro):
+        logger.debug('Now handling repository at %s (branch: %s, URL: %s)',
+                     local_path, branch, repo_url)
+        gr = GitRepository(source_root, local_path, repo_url, branch)
+
+        # Verify the current branch is major.minor or brainvisa-major.minor
+        if gr.local_branch != branch:
+            logger.error('skipping %s: repository must be on the %s branch',
+                         local_path, branch)
+            continue
+
+        # Verify that there are no uncommitted changes
+        if gr.dirty:
+            logger.error('skipping %s: repository has uncommitted changes',
+                         local_path)
+            continue
+
+        # Verify the current version in project_info.cmake / info.py
+        source_version_tuple = get_source_version_tuple(os.path.join(
+            source_root, local_path))
+        if source_version_tuple is None:
+            logger.error('skipping %s: cannot find version number in the '
+                         'sources', local_path)
+            continue
+        logger.debug('Found version number %s in %s',
+                     source_version_tuple, local_path)
+        if source_version_tuple == (major, minor, 0):
+            project_version_follows_brainvisa = True
+            new_branch_name = new_branch_version
+        else:
+            project_version_follows_brainvisa = False
+            new_branch_name = f'brainvisa-{new_branch_version}'
+
+        # Create the new branch locally
+        cmd = ['git', 'checkout', '-b', new_branch_name]
+        if dry_run:
+            logger.info('Dry-run: would now call %s',
+                        ' '.join(shlex.quote(arg) for arg in cmd))
+        else:
+            retcode = gr.call_command(cmd, echo=True)
+            if retcode != 0:
+                logger.error('Git error while creating the branch named %s in '
+                             '%s. Leaving the repository in its current '
+                             'state.',
+                             new_branch_name, local_path)
+                continue
+
+        # Push the new branch
+        try:
+            gr.ensure_origin_remote()
+        except GitUpdateError:
+            logger.error('Git error setting the origin remote. The branch has '
+                         'been created locally but cannot be pushed. Leaving '
+                         'the repository in its current state.')
+            continue
+        cmd = ['git', 'push', 'origin', '--set-upstream', new_branch_name]
+        if dry_run:
+            logger.info('Dry-run: would now call %s',
+                        ' '.join(shlex.quote(arg) for arg in cmd))
+        else:
+            retcode = gr.call_command(cmd, echo=True)
+            if retcode != 0:
+                logger.error('failed to push the new branch for %s. Will now '
+                             'carry on to bumping the version number. Please '
+                             'push the branch yourself afterwards.',
+                             local_path)
+            else:
+                logger.info('Successfully pushed %s', local_path)
+
+        # Go back to the master branch
+        cmd = ['git', 'checkout', branch, '--']
+        if dry_run:
+            logger.info('Dry-run: would now call %s',
+                        ' '.join(shlex.quote(arg) for arg in cmd))
+        else:
+            retcode = gr.call_command(cmd, echo=True)
+            if retcode != 0:
+                logger.error('Git error while switching back to the master '
+                             'branch (%s) in %s. Leaving the repository in '
+                             'its current state.',
+                             branch, local_path)
+                continue
+
+        # Bump the minor version on the master branch in project_info.cmake /
+        # info.py, commit, and push
+        if project_version_follows_brainvisa:
+            set_version_number_and_commit(source_root, local_path,
+                                          (major, minor + 1, 0),
+                                          branch, gr,
+                                          dry_run=dry_run)
+        else:
+            candidate_version = (source_version_tuple[0],
+                                 source_version_tuple[1] + 1,
+                                 0)
+            candidate_version_str = '.'.join(str(n) for n in candidate_version)
+            if user_confirms(f'Bump version of {local_path} to '
+                             f'{candidate_version_str}? [y/n] ',
+                             dry_run=dry_run, dry_run_reply=True):
+                set_version_number_and_commit(source_root, local_path,
+                                              candidate_version,
+                                              branch, gr,
+                                              dry_run=dry_run)
+
+
+def parse_command_line(argv=sys.argv):
+    """Parse the script's command line."""
+    import argparse
+    parser = argparse.ArgumentParser(description="""\
+Add a tag to every Git project, bump the version in sources, and push.
+
+For each Git repository in the distro:
+  -  Verify the current branch is major.minor or brainvisa-major.minor
+  -  Verify that there are no uncommitted changes
+  -  Verify the current version in project_info.cmake / info.py
+  -  Create the annotated tag and push it
+  -  Bump the micro version in project_info.cmake / info.py, commit and push
+""")
+    parser.add_argument('source_root',
+                        help='Root of the BrainVISA source directory, '
+                        'typically /casa/host/src.')
+    parser.add_argument('new_branch_version', type=str,
+                        help='Release branch that is about to be created '
+                        '(e.g. "5.1")')
+    parser.add_argument('--distro', default='cea',
+                        help='Distro to release. Note that you should use a '
+                        'source directory that has the largest set of '
+                        'components, typically the cea distro.')
+    parser.add_argument('--dry-run', default=True, action='store_true',
+                        help="List every step but don't actually perform "
+                        "anything that would write to the repositories.")
+    parser.add_argument('--really-do-it', dest='dry_run', action='store_false',
+                        help="List every step but don't actually perform "
+                        "anything that would write to the repositories.")
+    parser.add_argument('--debug', dest='logging_level', action='store_const',
+                        const=logging.DEBUG, default=logging.INFO,
+                        help='Enable debugging messages')
+
+    args = parser.parse_args(argv[1:])
+    return args
+
+
+def main(argv=sys.argv):
+    """The script's entry point."""
+    prog = os.path.basename(argv[0])
+    args = parse_command_line(argv)
+
+    # Configure logging
+    logging.basicConfig(
+        level=min(args.logging_level, logging.INFO),
+        filename='bv_create_release_branches.log',
+        filemode='a',
+    )
+    root_logger = logging.getLogger()
+    formatter = logging.Formatter(f'{prog}: %(levelname)s: %(message)s')
+    try:
+        from logutils.colorize import ColorizingStreamHandler
+        handler = ColorizingStreamHandler(sys.stderr)
+        handler.setFormatter(formatter)
+        handler.setLevel(args.logging_level)
+        root_logger.addHandler(handler)
+    except ModuleNotFoundError:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(formatter)
+        handler.setLevel(args.logging_level)
+        root_logger.addHandler(handler)
+        logger.info('You can activate colorful logging by installing '
+                    'the "logutils" Python package (e.g. with '
+                    'python3 -m pip install logutils)')
+
+    return bv_create_release_branches(
+        args.source_root,
+        args.new_branch_version,
+        distro=args.distro,
+        dry_run=args.dry_run,
+    ) or 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

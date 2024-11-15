@@ -1,0 +1,278 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+from __future__ import absolute_import, print_function
+
+import sys, os, re, shutil
+from optparse import OptionParser
+from datetime import datetime
+import dateutil.parser
+import subprocess
+
+try:
+    # compatibility for python3
+    import six
+except ImportError:
+    # six module not here, assume python2
+    class six(object):
+       @staticmethod
+       def iteritems(obj, *args, **kwargs):
+          return obj.iteritems(*args, **kwargs)
+
+def target_system(directory):
+    cmake_cache = os.path.join(directory, 'CMakeCache.txt')
+    if os.path.exists(cmake_cache):
+        # check if the build directory is a cross-compilation one
+        cross = False
+        system = None
+        with open(cmake_cache) as f:
+            for line in f:
+                if line.startswith('CMAKE_CROSSCOMPILING:') and 'ON'in line:
+                    cross = True
+                    if system is not None:
+                        break
+                elif line.startswith('CMAKE_TOOLCHAIN_FILE:'):
+                    if '-w32-' in line:
+                        system = 'win32'
+                    elif '-w64-' in line:
+                        system = 'win64'
+                    else:
+                        print('could not identify toolchain system')
+                        system = sys.platform
+                    if cross:
+                        break
+        if system is not None and cross:
+            return system
+    return sys.platform
+
+def clean_lib_dir(directory):
+    system = target_system(directory)
+    if system.startswith('linux'):
+        libre = re.compile(r'^lib(.*)\.so\..*$')
+        liblink = 'lib%s.so'
+    elif system == 'darwin':
+        libre = re.compile(r'^lib(.*)(\.[0-9]+)+\.dylib$')
+        liblink = 'lib%s.dylib'
+    elif system.startswith('win'):
+        libre = re.compile(r'lib(.*)((\.[0-9]+)+)\.dll$')
+        liblink = None
+        libs = {}
+    for f in os.listdir(directory):
+        m = libre.match(f)
+        if m:
+          if liblink:
+              link_f = os.path.join(directory, liblink % m.group(1))
+              if os.path.islink(link_f):
+                  f2 = os.path.join(directory, f)
+                  while os.path.islink(f2):
+                      f2 = os.path.normpath(os.path.join(directory,
+                                                         os.readlink(f2)))
+                  while os.path.islink(link_f):
+                      link_f = os.path.normpath(os.path.join(
+                          directory, os.readlink(link_f)))
+                  if os.path.abspath(link_f) != os.path.abspath(f2):
+                      print('obsolete lib:', f)
+                      os.unlink(os.path.join(directory, f))
+          else:
+              libs.setdefault(m.group(1), []).append((f, m.group(2)))
+    #if liblink is None: # windows: sort DLL versions
+        #for libname, libs_def in six.iteritems(libs):
+            #lib_vers = [l[1] for l in libs_def]
+            #versions = sorted(lib_vers)
+            #for ver in versions[:-1]:
+                #i = lib_vers.index(ver)
+                #print('obsolete lib:', libs_def[i][0])
+                #os.unlink(os.path.join(directory, libs_def[i][0]))
+
+
+def clean_share_dir(directory):
+    comp_re = re.compile('^(.*)-([0-9.]+)$')
+    comps = {}
+    for f in os.listdir(directory):
+        m = comp_re.match(f)
+        if m:
+            comps.setdefault(m.group(1), []).append((f, m.group(2)))
+
+    for comp_name, comp_def in six.iteritems(comps):
+        comp_vers = [l[1] for l in comp_def]
+        versions = sorted(comp_vers)
+        for ver in versions[:-1]:
+            i = comp_vers.index(ver)
+            print('obsolete directory:', comp_def[i][0])
+            shutil.rmtree(os.path.join(directory, comp_def[i][0]))
+
+
+parser = OptionParser( description = 'Clean build directory / directories'
+    'If no dir is specified, the current directory is assumed.'
+    'Dead links and obsolete python modules (.pyc and .pyo files without a '
+    'valid .py file next to them) are removed.',
+    usage='%prog [options] [dirnames]' )
+parser.add_option( '-a', '--accesstime', dest='accesstime',
+    help='delete files that have older access time than the one specified.',
+    default = '1971-01-01 00:00:00' )
+parser.add_option( '-b', '--bin', dest='binaries', action='store_true',
+    help='also check if all entries in bin/ are still present in Makefile, or '
+    'obsolete, and erase them if not. Needs to have configured and up-to-date '
+    'Makefiles' )
+parser.add_option( '-d', '--dir', dest='directories', action='store_true',
+    help='remove empty directories. Do not use this option during '
+    'compilation, since it may remove some useful, temporarily empty, '
+    'directories...' )
+parser.add_option( '-l', '--list', dest='list', action='store_true',
+    help='only list files and directories that will be deleted, do not delete '
+    'those.' )
+
+(options, args) = parser.parse_args()
+
+if len( args ) == 0:
+  basedirs = [ '.' ]
+else:
+  basedirs = args
+
+excluded_base_dirs = ['lib', 'bin', 'local', 'src', '.svn', '.git']
+excluded_dirs = []
+for d in basedirs:
+    excluded_dirs += [os.path.join(d, ed) for ed in excluded_base_dirs]
+    dlib = os.path.join(d, 'lib')
+    if os.path.isdir(dlib):
+        clean_lib_dir(dlib)
+    dshare = os.path.join(d, 'share')
+    if os.path.isdir(dshare):
+        clean_share_dir(dshare)
+        ddoc = os.path.join(dshare, 'doc')
+        if os.path.isdir(ddoc):
+            clean_share_dir(ddoc)
+
+basedirs0 = list(basedirs)
+basermdirs = set()
+accesstime = dateutil.parser.parse(options.accesstime)
+
+while basedirs:
+    d = basedirs.pop()
+    if isinstance(d, tuple):
+        d, excluded = d
+    else:
+        excluded = False
+    if d in excluded_dirs:
+        excluded = True
+
+    dircontent = os.listdir(d)
+
+    for f in dircontent:
+        path = os.path.join(d, f)
+        if os.path.isdir(path):
+            if os.path.islink(path):
+                # (if path is a symlink, don't recurse in it, it may be
+                # pointing to itself or somewhere already done, or in
+                # sources...)
+                continue
+            elif f == '__pycache__':
+                # __pycache__ directories are harmless, their .pyc files are
+                # ignored if the corresponding source file is gone
+                # (https://www.python.org/dev/peps/pep-3147/#id59)
+                continue
+            else:
+                basedirs.append((path, excluded))
+        elif os.path.islink(path):
+            if not os.path.exists(path):
+                print('rm dead link', path)
+                if not options.list:
+                    os.unlink(path)
+        elif f.endswith('.pyc') or f.endswith('.pyo'):
+            pyfile = path[:-1]
+            if not excluded and not os.path.exists(pyfile):
+                print('rm obsolete module', path)
+                if not options.list:
+                    os.unlink(path)
+        elif datetime.fromtimestamp(os.stat(path).st_atime) < accesstime:
+            print('rm obsolete file', path)
+            if not options.list:
+                os.unlink(path)
+
+    dircontent = os.listdir(d)
+    if len(dircontent) == 0:
+        if options.directories:
+            print('rmdir', d)
+            if not options.list :
+                os.rmdir(d)
+
+            if d != os.path.dirname(d):
+                basermdirs.add(os.path.dirname(d))
+
+while basermdirs:
+    d = basermdirs.pop()
+    if os.path.isdir(d):
+        dircontent = os.listdir(d)
+        if len(dircontent) == 0:
+            if options.directories:
+                print('rmdir', d)
+                if not options.list :
+                    os.rmdir(d)
+                if d != os.path.dirname(d):
+                    basermdirs.add(os.path.dirname(d))
+
+def parse_cmake_executables(directory):
+    cmake_cache = os.path.join(directory, 'CMakeCache.txt')
+    if not os.path.exists(cmake_cache):
+        # no cmake cache: no built executables
+        raise RuntimeError('No CMakeCache.txt found - not cleaning bin/')
+    cmds_re = re.compile('^.*-commands:INTERNAL=(.+)$')
+    all_cmds = []
+    with open(cmake_cache) as f:
+        for line in f:
+            m = cmds_re.match(line)
+            if m:
+                cmds = m.group(1).split(';')
+                all_cmds += cmds
+    if len(all_cmds) == 0:
+        # no command found
+        raise RuntimeError(
+            'No commands found in CMakeCache.txt, it is probably not up to '
+            'date - not cleaning bin/')
+    # the following may be installed by virtualenv
+    all_cmds += ['python', 'pip', 'pip-2.7', 'easy_install', 'activate',
+                 'activate.csh', 'activate.fish', 'activate_this.py',
+                 'easy_install-2.7']
+    return all_cmds
+
+if options.binaries:
+    cwd = os.getcwd()
+    skipped = {}
+    for d in basedirs0:
+        os.chdir(d)
+        bindir = os.path.join(d, 'bin')
+        if os.path.exists(bindir):
+            try:
+                all_cmds = parse_cmake_executables(d)
+                for f in os.listdir(bindir):
+                    if not os.path.islink(os.path.join(bindir, f)):
+                        if f not in all_cmds:
+                            # the following exceptions are not needed any
+                            # longer since bv_* commands are now part of
+                            # the regular components
+                            #if f.startswith('bv_'):
+                                #sk = skipped.setdefault(bindir, [])
+                                #sk.append(f)
+                            #else:
+                            if f.endswith('.exe') and f[:-4] in all_cmds:
+                                continue # win exe in list: skip
+                            if f.endswith('.app'):
+                                # Mac graphical commands
+                                if f[:-4] in all_cmds:
+                                    continue
+                                print('rm obsolete command', f[:-4])
+                                if not options.list :
+                                    shutil.rmtree(os.path.join(bindir, f))
+                            else:
+                                print('rm obsolete command', f)
+                                if not options.list :
+                                    os.unlink(os.path.join(bindir, f))
+            except RuntimeError as e:
+                print(e)
+    for d, items in six.iteritems(skipped):
+        print('-- skipped from', d)
+        for f in items:
+            print('skipped', f, '(may be part of bv_cmake)')
+    os.chdir(cwd)
+
+

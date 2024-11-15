@@ -1,0 +1,31 @@
+#!/usr/bin/env python
+
+import sys, os
+
+if len(sys.argv) >= 2 and sys.argv[1] in ('-h', '--help'):
+    print('bv_unenv [command [command_arg [...]]]')
+    print('Reset original environment (that was active before using bv_env)')
+    print('Without arguments, print the runtime environment to be used '
+          'on the standard output')
+    print('With arguments, set the runtime environment, and run the '
+          'command passed in arguments in this environment.')
+    sys.exit(0)
+
+unenv = [ i for i in os.environ if i.startswith( 'BRAINVISA_UNENV_' ) ]
+if len( sys.argv ) > 1:
+    for n in unenv:
+        v = os.environ.get(n)
+        if v:
+            os.environ[n[16:]] = os.environ[n]
+        else:
+            del os.environ[n[16:]]
+        del os.environ[n]
+    os.execvpe( sys.argv[1], sys.argv[ 1: ], os.environ )
+else:
+    for n in unenv:
+        v = os.environ.get(n)
+        if v:
+            print(f"export {n[16:]}='{v}'")
+        else:
+            print(f'unset {n[16:]}')
+        print('unset', n)

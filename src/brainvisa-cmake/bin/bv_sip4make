@@ -1,0 +1,248 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import os
+import os.path as osp
+import sys
+import shutil
+import tempfile
+import re
+import subprocess
+import toml
+
+def most_recent_modif(directories):
+    result = None
+    for base_dir in directories:
+        for root, d_names, f_names in os.walk(base_dir):
+            for f in f_names:
+                t = os.stat(os.path.join(root, f)).st_mtime
+                if result is None:
+                    result = t
+                elif t > result:
+                    result = t
+    return result
+
+# print('SIP options:', sys.argv)
+sys.stdout.flush()
+
+# find -S option for sip command specified
+try:
+    sipopt = sys.argv.index('-S')
+except ValueError:
+    sipopt = -1
+if sipopt == len(sys.argv) - 1:
+    sipopt = -1
+if sipopt >= 0:
+    sipcmd = sys.argv[sipopt + 1]
+    del sys.argv[sipopt + 1], sys.argv[sipopt]
+elif sys.platform.startswith('win'):
+    sipcmd = 'sip.exe'
+else:
+    sipcmd = 'sip'
+
+sip6 = False
+if osp.basename(sipcmd).startswith('sip-build'):
+    sip6 = True
+
+try:
+    copt = sys.argv.index('-c')
+except ValueError:
+    copt = -1
+if copt < 0:
+    # print('-c option not found. Running sip normally')
+    pass
+elif copt == len(sys.argv) - 1:
+    # print('no argument to -c option. Running sip normally')
+    pass
+    copt = -1
+if copt >= 0:
+    outdir = sys.argv[copt + 1]
+    if sip6:
+        del sys.argv[copt]
+        del sys.argv[copt]
+
+# find -j option
+try:
+    ijopt = sys.argv.index('-j')
+except ValueError:
+    ijopt = -1
+if ijopt == len(sys.argv) - 1:
+    ijopt = -1
+if ijopt >= 0:
+    jopt = int(sys.argv[ijopt + 1])
+
+if sip6:
+    del sys.argv[ijopt]
+    del sys.argv[ijopt]
+
+# if --listingOnly, display only the generated source list
+try:
+    listingOnly = sys.argv.index('--listingOnly')
+    sys.argv.remove('--listingOnly')
+except ValueError:
+    listingOnly = -1
+
+if copt < 0:
+    sys.exit(subprocess.call([sipcmd] + sys.argv[1:]) >> 8)
+
+update_date = None
+if sip6:
+    # sip 6 works very differently
+
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+    else:
+        # Do not do anything if no build file
+        # is older than any sip file
+        sip_project = toml.load('pyproject.toml')
+        sip_dirs = sip_project['tool']['sip']['project']['sip-include-dirs']
+        in_date = most_recent_modif(sip_dirs)
+        out_date = most_recent_modif([outdir])
+        if out_date is not None and out_date >= in_date:
+            print('All output files are more recent than input files: cancel generation')
+            sys.exit(0)
+    tdir = tempfile.mkdtemp()
+    old_dir = shutil.copytree(outdir, osp.join(tdir, 'sip'), symlinks=True,
+                              ignore_dangling_symlinks=True)
+    # call SIP-build
+    res = subprocess.call([sipcmd] + sys.argv[1:])
+    new_dir = outdir
+
+else:
+
+    tdir = tempfile.mkdtemp()
+    new_dir = tdir
+    old_dir = outdir
+    # print('temp dir:', tdir)
+    # print('output dir:', outdir)
+    sys.argv[copt + 1] = tdir
+
+    # call SIP
+    print(sipcmd + ' "' + '" "'.join( sys.argv[1:] ) + '"', flush=True)
+    res = subprocess.call([sipcmd] + sys.argv[1:])
+    if not os.path.exists(outdir):
+        os.mkdir(outdir)
+
+def skipcomment(f):
+    try:
+        for i in range(5):
+            l = f.readline()  # for now I know it's 5 lines...
+    except IOError:
+        # if fewer than 5 lines
+        pass
+
+if os.path.isdir(new_dir):
+    tlist = os.listdir(new_dir)
+else:
+    tlist = []
+
+if listingOnly != -1:
+    print(";".join(tlist))
+    res = 1
+
+if res == 0:
+
+    # compare files
+    olist = os.listdir(old_dir)
+    ccfiles = []
+
+    # create empty files if -j option is used and not enough files were
+    # generated
+    if jopt > 0:
+        for x in tlist:
+            if x.endswith('.cc') or x.endswith('.cpp'):
+                ccfiles.append(x)
+        r = re.compile(r'^(.*part)([0-9]+)\.(cpp|cc)$')
+        indices = set()
+        base = ''
+        ext = ''
+        for x in ccfiles:
+            m = r.match(x)
+            if m:
+                i = int(m.group(2))
+                indices.add(i)
+                if base == '':
+                    base = m.group(1)
+                    ext = m.group(3)
+        for i in range(jopt):
+            if i not in indices:
+                # write an empty file
+                fname = base + str(i) + '.' + ext
+                # print('adding empty file', fname)
+                open(os.path.join(new_dir, fname), 'w')
+                tlist.append(fname)
+
+    line_re = re.compile('^#line ([0-9]+) ".*"$')
+
+    for x in tlist:
+        if x not in olist:
+            print(x, 'is a new file')
+            if new_dir != outdir:
+                shutil.copyfile(os.path.join(new_dir, x),
+                                os.path.join(outdir, x))
+        else:
+            tf = open(os.path.join(new_dir, x))
+            of = open(os.path.join(old_dir, x))
+            # skip initial comments
+            skipcomment(tf)
+            skipcomment(of)
+            diff = 0
+            for l in tf:
+                ol = of.readline()
+                if l != ol:
+                    is_line_macro = line_re.match(l)
+                    if is_line_macro:
+                        is_other_line_macro = line_re.match(ol)
+                        if not is_other_line_macro \
+                                or is_line_macro.group(1) \
+                                    != is_other_line_macro.group(1):
+                            diff = 1
+                            break
+                    else:
+                        diff = 1
+                        break
+            if not diff:
+                ol = of.readline()
+                if ol != '':
+                    diff = 1
+            tf.close()
+            of.close()
+            if diff:
+                print(x, 'differs')
+                if outdir != new_dir:
+                    shutil.copyfile(
+                        os.path.join(new_dir, x), os.path.join(outdir, x))
+            else:
+                # print(x, 'is the same.')
+                if outdir == new_dir:
+                    # copy stats from original
+                    shutil.copystat(os.path.join(old_dir, x),
+                                    os.path.join(outdir, x))
+                if update_date is not None \
+                        and os.stat(os.path.join(outdir, x)).st_mtime \
+                            < update_date:
+                    # one input is more recent than the output .sip file, even
+                    # if it does not involve changes in the latter.
+                    # Update its date in order to avoid re-running sip next
+                    # time.
+                    # print('update date for', os.path.join(outdir, x))
+                    os.utime(os.path.join(outdir, x),
+                             (update_date, update_date))
+
+    # cleanup obsolete files
+    for x in olist:
+        if x not in tlist and (x.endswith('.h') or x.endswith('.cc')
+                               or x.endswith('.cpp') or x.endswith('.hpp')):
+            # keep files of size 0 since they may be here intentionnally.
+            print(x, 'is obsolete')
+            os.unlink(os.path.join(outdir, x))
+
+# delete temp directory
+shutil.rmtree(tdir)
+
+# print('SIP exit code:', res)
+if res & 0xff == 0:
+    res = res >> 8
+else:
+    print('Error: sip exited with signal', res, file=sys.stderr)
+sys.exit(res)

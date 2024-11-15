@@ -1,0 +1,7 @@
+build_directory = '@CMAKE_BINARY_DIR@'
+build_system = '@BRAINVISA_SYSTEM_IDENTIFICATION@'
+build_processor = '@CMAKE_SYSTEM_PROCESSOR@'
+packages_dependencies = {}
+packages_info = {}
+
+

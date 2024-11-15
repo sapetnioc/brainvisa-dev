@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/git-commands/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/brainvisa/brainvisa-cmake
+	branch = master
+	commit = ec4e1a6b5428192c814c5ca1574f290d5193223f
+	parent = d29dc363299cc8764f214db32ed8c8144c2ffb36
+	method = merge
+	cmdver = 0.4.3

@@ -1,0 +1,2 @@
+brainvisa_add_executable( test_brainvisa-cmake_tutorial test_brainvisa-cmake_tutorial/test_brainvisa-cmake_tutorial.cc )
+target_link_libraries( test_brainvisa-cmake_tutorial brainvisa-cmake_tutorial )

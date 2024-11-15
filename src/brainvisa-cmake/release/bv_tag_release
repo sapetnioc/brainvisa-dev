@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import logging
+import os
+import shlex
+import sys
+
+from brainvisa_cmake.components_definition import components_definition
+from brainvisa_cmake.git import GitRepository, GitUpdateError
+from brainvisa_cmake.release import user_confirms
+from brainvisa_cmake.release import get_source_version_tuple
+from brainvisa_cmake.release import set_source_version_tuple
+from brainvisa.maker.release import set_version_number_and_commit
+
+
+logger = logging.getLogger(__name__)
+
+
+def iterate_release_branch_git_repositories(distro, major, minor):
+    """Iterate through repositories of the given distro on the release branch.
+
+    The generator yields tuples in the form: (local_path, repo_url, branch):
+
+    - local_path is the local path to the repository, relative to the root of
+      the source directory
+    - url is the URL of the Git repository
+    - branch is the name of the release branch for that repository
+    (typically {major}.{minor} or brainvisa-{major}.{minor}).
+    """
+    release_branch = f'{major:d}.{minor:d}'
+    for category_name, category_contents in components_definition:
+        for component_name, component_dict in category_contents['components']:
+            if distro in component_dict['groups']:
+                if release_branch in component_dict['branches']:
+                    repo_string, local_path = (
+                        component_dict['branches'][release_branch]
+                    )
+                    repo_info = repo_string.split()
+                    if repo_info[0] == 'git':
+                        yield (
+                            local_path,
+                            repo_info[1],
+                            repo_info[2].split(':')[1],
+                        )
+                    else:
+                        logger.warning('Non-Git repository of type %s at %s '
+                                       'will need to be handled manually.',
+                                       repo_info[0], local_path)
+
+
+def bv_tag_release(source_root, version_to_tag, *,
+                   distro='cea', dry_run=True,
+                   fix_source_version_numbers=False):
+    # Parse the version_to_tag
+    major, minor, micro = version_to_tag.split('.')
+    major = int(major)
+    minor = int(minor)
+    micro = int(micro)
+    assert version_to_tag == f'{major:d}.{minor:d}.{micro:d}'
+
+    for local_path, repo_url, branch in (
+            iterate_release_branch_git_repositories(distro, major, minor)):
+        logger.info('Now handling repository at %s (branch: %s, URL: %s)',
+                    local_path, branch, repo_url)
+        gr = GitRepository(source_root, local_path, repo_url, branch)
+
+        if branch == f'{major:d}.{minor:d}':
+            project_version_follows_brainvisa = True
+        elif branch == f'brainvisa-{major:d}.{minor:d}':
+            project_version_follows_brainvisa = False
+        else:
+            logger.error('skipping %s: unexpected release branch name %r '
+                         f'(expected either {major:d}.{minor:d} or '
+                         f'brainvisa-{major:d}.{minor:d})',
+                         local_path, branch)
+            continue
+
+        # Verify the current branch is major.minor or brainvisa-major.minor
+        if gr.local_branch != branch:
+            logger.error('skipping %s: repository must be on the %s branch',
+                         local_path, branch)
+            continue
+
+        # Verify that there are no uncommitted changes
+        if gr.dirty:
+            logger.error('skipping %s: repository has uncommitted changes',
+                         local_path)
+            continue
+
+        # Verify the current version in project_info.cmake / info.py
+        source_version_tuple = get_source_version_tuple(os.path.join(
+            source_root, local_path))
+        if source_version_tuple is None:
+            logger.error('skipping %s: cannot find version number in the '
+                         'sources', local_path)
+            continue
+        logger.debug('Found version number %s in %s',
+                     source_version_tuple, local_path)
+        if (project_version_follows_brainvisa
+                and source_version_tuple != (major, minor, micro)):
+            if fix_source_version_numbers:
+                logger.warning('Will now set the version number to %d.%d.%d '
+                               'in %s', major, minor, micro,
+                               local_path)
+                set_version_number_and_commit(source_root, local_path,
+                                              (major, minor, micro),
+                                              branch, gr,
+                                              dry_run=dry_run)
+            else:
+                logger.error('skipping %s: source version number %s differs from '
+                             'the BrainVISA version about to be released',
+                             local_path,
+                             '.'.join(str(n) for n in source_version_tuple))
+                continue
+        if (fix_source_version_numbers
+                and not project_version_follows_brainvisa):
+            logger.warning('project %s has source version number %s, '
+                           'please change it manually if needed.',
+                           local_path,
+                           '.'.join(str(n) for n in source_version_tuple))
+
+        if fix_source_version_numbers:
+            continue  # In this mode we do not tag
+
+        # Create the annotated tag and push it
+        if project_version_follows_brainvisa:
+            tag_name = f'v{version_to_tag}'
+            tag_message = f'Version {version_to_tag}'
+        else:
+            tag_name = f'brainvisa-{version_to_tag}'
+            tag_message = (f'Version incorporated in '
+                           f'BrainVISA {version_to_tag}')
+
+        cmd = ['git', 'tag', '-a', '-m', tag_message, tag_name, 'HEAD']
+        if dry_run:
+            logger.info('Dry-run: would now call %s',
+                        ' '.join(shlex.quote(arg) for arg in cmd))
+        else:
+            retcode = gr.call_command(cmd, echo=True)
+            if retcode != 0:
+                logger.error('Git error while creating the tag named %s in %s.'
+                             'Leaving the repository in its current state.',
+                             tag_name, local_path)
+                continue
+
+        try:
+            gr.ensure_origin_remote()
+        except GitUpdateError:
+            logger.error('Git error setting the origin remote. The tag has '
+                         'been created locally but cannot be pushed. Leaving '
+                         'the repository in its current state.')
+            continue
+        cmd = ['git', 'push', 'origin',
+               f'refs/tags/{tag_name}:refs/tags/{tag_name}']
+        if dry_run:
+            logger.info('Dry-run: would now call %s',
+                        ' '.join(shlex.quote(arg) for arg in cmd))
+        else:
+            retcode = gr.call_command(cmd, echo=True)
+            if retcode != 0:
+                logger.error('failed to push the new tag for %s. Will now '
+                             'carry on to bumping the version number. Please '
+                             'push the tag yourself afterwards.',
+                             local_path)
+            else:
+                logger.info('Successfully tagged %s', local_path)
+
+        # Bump the micro version in project_info.cmake / info.py, commit, and
+        # push
+        if project_version_follows_brainvisa:
+            set_version_number_and_commit(source_root, local_path,
+                                          (major, minor, micro + 1),
+                                          branch, gr,
+                                          dry_run=dry_run)
+        else:
+            candidate_version = source_version_tuple[:2] + (micro + 1,)
+            candidate_version_str = '.'.join(str(n) for n in candidate_version)
+            if user_confirms(f'Bump version of {local_path} to '
+                             f'{candidate_version_str}? [y/n] ',
+                             dry_run=dry_run, dry_run_reply=True):
+                set_version_number_and_commit(source_root, local_path,
+                                              candidate_version,
+                                              branch, gr,
+                                              dry_run=dry_run)
+
+
+def parse_command_line(argv=sys.argv):
+    """Parse the script's command line."""
+    import argparse
+    parser = argparse.ArgumentParser(description="""\
+Add a tag to every Git project, bump the version in sources, and push.
+
+For each Git repository in the distro:
+  -  Verify the current branch is major.minor or brainvisa-major.minor
+  -  Verify that there are no uncommitted changes
+  -  Verify the current version in project_info.cmake / info.py
+  -  Create the annotated tag and push it
+  -  Bump the micro version in project_info.cmake / info.py, commit and push
+""")
+    parser.add_argument('source_root',
+                        help='Root of the BrainVISA source directory, '
+                        'typically /casa/host/src.')
+    parser.add_argument('version_to_tag', type=str,
+                        help='Version that is about to be tagged '
+                        '(e.g. "5.0.3")')
+    parser.add_argument('--fix-source-version-numbers', action='store_true',
+                        help='In this mode no tags are created, but the source'
+                        'version numbers are set to version_to_tag in projects'
+                        'that follow the BrainVISA version.')
+    parser.add_argument('--distro', default='cea',
+                        help='Distro to release. Note that you should use a '
+                        'source directory that has the largest set of '
+                        'components, typically the cea distro.')
+    parser.add_argument('--dry-run', default=True, action='store_true',
+                        help="List every step but don't actually perform "
+                        "anything that would write to the repositories.")
+    parser.add_argument('--really-do-it', dest='dry_run', action='store_false',
+                        help="Actually perform the actions, including "
+                        "IRREVERSIBLE actions such as pushing tags. MAKE SURE "
+                        "TO RUN THE DRY-RUN MODE FIRST!")
+    parser.add_argument('--debug', dest='logging_level', action='store_const',
+                        const=logging.DEBUG, default=logging.INFO,
+                        help='Enable debugging messages')
+
+    args = parser.parse_args(argv[1:])
+    return args
+
+
+def main(argv=sys.argv):
+    """The script's entry point."""
+    prog = os.path.basename(argv[0])
+    args = parse_command_line(argv)
+
+    # Configure logging
+    logging.basicConfig(
+        level=min(args.logging_level, logging.INFO),
+        filename='bv_tag_release.log',
+        filemode='a',
+    )
+    root_logger = logging.getLogger()
+    formatter = logging.Formatter(f'{prog}: %(levelname)s: %(message)s')
+    try:
+        from logutils.colorize import ColorizingStreamHandler
+        handler = ColorizingStreamHandler(sys.stderr)
+        handler.setFormatter(formatter)
+        handler.setLevel(args.logging_level)
+        root_logger.addHandler(handler)
+    except ModuleNotFoundError:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(formatter)
+        handler.setLevel(args.logging_level)
+        root_logger.addHandler(handler)
+        logger.info('You can activate colorful logging by installing '
+                    'the "logutils" Python package (e.g. with '
+                    'python3 -m pip install logutils)')
+
+    return bv_tag_release(
+        args.source_root,
+        args.version_to_tag,
+        distro=args.distro,
+        dry_run=args.dry_run,
+        fix_source_version_numbers=args.fix_source_version_numbers,
+    ) or 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,0 +1,94 @@
+#!/bin/bash -f
+
+# this scripts runs bv_env either from the normal binary directory (same as
+# this script), of from a package install directory specified in the
+# BRAINVISA_PACKAGE_INSTALL_PREFIX variable if it is defined.
+# this is used to run tests from a build directory (with correctly setup
+# Makefiles/ctest) for testing installed packages.
+#
+# Remote mode:
+# IF an additional env variable BRAINVISA_TEST_REMOTE_COMMAND is set,
+# it is prepended to the test command, and can be used to connect
+# to a remote test host. For instance if:
+# BRAINVISA_TEST_REMOTE_COMMAND=ssh -t -X testmachine
+# BRAINVISA_PACKAGE_INSTALL_PREFIX=/home/test/brainvisa_testing
+# then the command will be:
+# ssh -t -X testmachine /home/test/brainvisa_testing/bin/bv_env <commandline>
+#
+# Other example using docker:
+# BRAINVISA_TEST_REMOTE_COMMAND=docker run --rm -v /home/test:/home/test -u "$(id -u):$(id -g)" -e TMPDIR=/home/test/tmp -v /tmp/.X11-unix:/tmp/.X11-unix -e DISPLAY=$DISPLAY cati/brainvisa-test:ubuntu-16.04 xvfb-run
+
+if [[ -z $BRAINVISA_PACKAGE_INSTALL_PREFIX ]]; then
+  BRAINVISA_PACKAGE_INSTALL_PREFIX=$(dirname -- "$(dirname -- "$0")")
+fi
+
+# check if we test windows binary tree
+if [[ -f ${BRAINVISA_PACKAGE_INSTALL_PREFIX}/bin/bv_env.exe ]]; then
+  BRAINVISA_ENV=${BRAINVISA_PACKAGE_INSTALL_PREFIX}/bin/bv_env.exe
+else
+  # check if we test linux or mac binary tree
+  if [[ -f ${BRAINVISA_PACKAGE_INSTALL_PREFIX}/bin/bv_env ]]; then
+    BRAINVISA_ENV=${BRAINVISA_PACKAGE_INSTALL_PREFIX}/bin/bv_env
+  fi
+fi
+
+if [[ -z $BRAINVISA_ENV ]]; then
+  echo "No bv_env command found for in ${BRAINVISA_PACKAGE_INSTALL_PREFIX}/bin" >&2
+  exit 1
+fi
+
+# use only basename of main executable
+# (to avoid hard-coded /usr/bin/python for instance)
+CMD=$(basename -- "$1")
+shift
+
+# expand variable substitutions inside arguments
+i=0
+exp=  # prevent injection
+for var_value in "$@"
+do
+  # ${var_value// /\\ } adds a backslash before every space in var_value
+  exp[$i]=$(eval printf '%s' ${var_value// /\\ })
+  i=$(($i+1))
+done
+
+bv_env_cmd=("${BRAINVISA_ENV}")
+# PYTHONHASHSEED disables Python hash randomization so that test results are
+# reproducible (randomization is enabled by default in Python 3.3 and later).
+test_env=(env PYTHONHASHSEED=0)
+
+if [[ .${BRAINVISA_ENV##*.} == .exe ]]; then
+    # Windows case
+    base_cmd=(${BRAINVISA_TEST_REMOTE_COMMAND} "${bv_env_cmd[@]}" "$CMD")
+    wine_found=0
+    wine_cmd=()
+
+    # Find wine in args and set the required test environment variables before it
+    for arg in ${base_cmd[@]}; do
+        if [[ "$arg" == "wine" ]] || [[ "$arg" == "wine64" ]]; then
+            if [[ $wine_found == 0 ]]; then
+                # Only add wine and test environment the first time we find it
+                wine_found=1
+                wine_cmd=("${wine_cmd[@]}" "${test_env[@]}" "${arg}")
+            fi
+        else
+            wine_cmd=("${wine_cmd[@]}" "${arg}")
+        fi
+    done
+    
+    if [[ $wine_found == 0 ]]; then
+        if [[ -n "${WINECMD}" ]]; then
+            wine_cmd=("${WINECMD}" "${wine_cmd[@]}")
+        fi
+        wine_cmd=("${test_env[@]}" "${wine_cmd[@]}")
+    fi
+    
+    # Replace base cmd with wine one
+    base_cmd=("${wine_cmd[@]}")
+else
+    # Standard linux/macOS case: test environment variables are always set before calling bv_env
+    base_cmd=(${BRAINVISA_TEST_REMOTE_COMMAND} "${test_env[@]}" "${bv_env_cmd[@]}" "$CMD")
+fi
+
+# echo "${base_cmd[@]}" ${exp[@]}
+exec "${base_cmd[@]}" ${exp[@]}

@@ -1,0 +1,237 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+from __future__ import absolute_import, print_function
+
+from optparse import OptionParser
+import os
+import sys
+import shutil
+import errno
+
+
+def realrealpath(path):
+    return os.path.abspath(os.path.normpath(os.path.realpath(path)))
+
+
+def is_in_base(path, bases):
+    rpath = os.path.realpath(os.path.abspath(path))
+    for base in bases:
+        rbase = os.path.realpath(base)
+        if rpath == rbase or rpath.startswith(rbase + os.sep):
+            return (True, os.path.relpath(rpath, base), base)
+    for base in bases:
+        if path == base or path.startswith(base + os.sep):
+            return (True, os.path.relpath(path, base), base)
+    return (False, path, '')
+
+
+def is_external_link(path, bases):
+    '''Test if path (normally a symlink) points out of "bases" trees.
+    Returns a tuple of 3 elements:
+    ( is_ext_link, final_path, final_is_symlink, relpath, base )
+    '''
+    if not os.path.exists(path):
+        raise IOError('file does not exist: %s' % path)
+    if not os.path.islink(path):
+        return (False, path, False, path, '')
+    found = False
+    while not found:
+        lpath = os.readlink(path)
+        if not os.path.isabs(lpath):
+            path = os.path.realpath(
+                os.path.join(os.path.realpath(os.path.dirname(path)), lpath))
+        else:
+            path = os.path.realpath(lpath)
+        found = not os.path.islink(path)
+        inbase, relpath, base = is_in_base(path, bases)
+    return (not inbase, path, not found, relpath, base)
+
+
+def rel_link(source, dest, destbase):
+    if not os.path.isabs(source):
+        source = os.path.realpath(os.path.join(destbase, source))
+    relspath = os.path.relpath(source, os.path.dirname(dest))
+    if os.path.basename( relspath ) == relspath \
+            and relspath == os.path.basename(dest):
+        return None  # identity
+    return relspath
+
+
+def symlink(reldpath, destpath, simulation):
+    if os.path.islink(destpath) \
+            and os.readlink(destpath) == reldpath:
+        # link already exists and points the correct location
+        return
+    if not simulation:
+        if os.path.lexists(destpath):
+            os.remove(destpath)
+        os.symlink(reldpath, destpath)
+
+
+def copy2(source, dest, simulation=False):
+    if not simulation:
+        try:
+            shutil.copy2(source, dest)
+        except OSError as e:
+            # some filesystems cannot carry all flags
+            if e.errno == errno.EOPNOTSUPP:
+                # fallback to a standard copy
+                if os.path.exists(dest):
+                    os.chmod(dest, 0o777)
+                    os.unlink(dest)
+                shutil.copy(source, dest)
+            else:
+                raise # real error
+
+
+def make_ext_symlink(source, dest, ext_links, simulation):
+    if source in ext_links:
+        realsrc = ext_links[source]
+        # print('already copied as', realsrc)
+        reldpath = rel_link(realsrc, dest, '')
+        if reldpath is not None:
+            symlink(reldpath, destpath, simulation)
+    else:
+        # make a real copy, and record this destination
+        ext_links[source] = dest
+        if not simulation:
+            copy2(source, dest)
+
+
+parser = OptionParser(sys.argv[0] + ' [options] source1 [source2] [...] dest'
+                      'Copy directories trees, like "cp -a" or "rsync '
+                      '-a --copy-unsafe-links", but try to preserve internal '
+                      'symlinks, and keep a unique copy of actual files for '
+                      'external symlinks.\n'
+                      '')
+parser.add_option('-b', '--base', dest='base', action='append', default=[],
+                  help='base directory to consider external symlinks. Default '
+                  'is input directories. Several -b options may be passed.')
+parser.add_option('-s', '--simulation', dest='simulation',
+                  action='store_true', help='do not perform actual copies, '
+                  'don\'t write anything, just tell what will be done (use with -v option)')
+parser.add_option('-v', '--verbose', dest='verbose', action='store_true',
+                  help='say what is done')
+parser.add_option('-e', '--exclude', dest='exclude', action='append',
+                  default=[],
+                  help='exclude some (source) directories from copies. '
+                  'Several -e options may be passed.')
+parser.add_option('-r', '--remove-under', dest='remove_under', action='append',
+                  default=[],
+                  help='remove destination directories under the given '
+                  'directory before copying new files in them. Multiple -r '
+                  'options allowed.')
+parser.add_option('-d', '--remove-dir', dest='remove_dir', action='append',
+                  default=[],
+                  help='remove destination directories which are equal to '
+                  'the given directory before copying new files in them. '
+                  'Multiple -d options allowed.')
+
+options, args = parser.parse_args(sys.argv)
+
+if len(args) < 3:
+    parser.parse_args(['-h'])
+
+dest = realrealpath(args[-1])
+sources = [realrealpath(p) for p in args[1:-1]]
+exclude = [realrealpath(p) for p in options.exclude]
+missing = [p for p in sources if not os.path.exists(p)]
+remove_under = [os.path.join(r, '') for r in options.remove_under]
+remove_dirs = options.remove_dir
+if missing:
+    print(sys.stderr, 'missing files:', missing, file=sys.stderr)
+    sources = [p for p in sources if p not in missing]
+
+if ( os.path.exists( dest ) and not os.path.isdir( dest ) ) or \
+        (not os.path.exists(dest) and len(sources) > 1):
+    raise OSError('destination "%s" is not a directory.', dest)
+
+bases = options.base
+if len(bases) == 0:
+    bases = [os.path.dirname(p) for p in sources]
+
+if not os.path.exists(dest):
+    os.mkdir(dest)
+    sources = [os.path.join(sources[0], p)
+               for p in os.listdir(sources[0])]
+
+if options.verbose:
+    print('sources:', sources)
+    print('dest:', dest)
+    print('bases:', bases)
+    print('exclude:', exclude)
+
+ext_links = {}  # external links list
+
+# sys.exit( 1 )
+
+while sources:
+    source = sources.pop()
+    if realrealpath(source) in exclude:
+        if options.verbose:
+            print('skipping excluded %s file/directory' % source)
+        continue
+    if realrealpath(source) == dest:
+        if options.verbose:
+            print('skipping', source, ', which is destination directory')
+        continue
+    x, rpath, base = is_in_base(source, bases)
+    destpath = os.path.join(dest, rpath)
+    if options.verbose:
+        print(source, '->', destpath, x, rpath, base)
+    try:
+        is_extlink, spath, is_link, relpath, base \
+            = is_external_link(source, bases)
+    except IOError as e:
+        print(e, file=sys.stderr)
+        continue
+    if is_link:
+        if not is_extlink:
+            # internal symlink
+            if options.verbose:
+                print('internal symlink:', relpath)
+            reldpath = rel_link(relpath, destpath, dest)
+            symlink(reldpath, destpath, options.simulation)
+        else:
+            if options.verbose:
+                print('external symlink:', relpath)
+            make_ext_symlink(spath, destpath, ext_links, options.simulation)
+    elif os.path.isdir(source):
+        # directory
+        if os.path.isdir(destpath) and not options.simulation:
+            if destpath in remove_dirs:
+                shutil.rmtree(destpath)
+            else:
+                for rdir in remove_under:
+                    if destpath.startswith(rdir) and destpath != rdir:
+                        shutil.rmtree(destpath)
+                        break
+        if not options.simulation and not os.path.isdir(destpath):
+            os.mkdir(destpath)
+        for filename in os.listdir(source):
+            sources.append(os.path.join(source, filename))
+    else:
+        # file
+        if is_extlink:
+            if options.verbose:
+                print('external symlink -> file:', destpath, '->', relpath,
+                      'from', source)
+            make_ext_symlink(spath, destpath, ext_links, options.simulation)
+        elif os.path.islink(source):
+            reldpath = rel_link(relpath, destpath, dest)
+            if reldpath is None:
+                if options.verbose:
+                    print('identity symlink')
+            else:
+                if options.verbose:
+                    print('internal symlink -> file:', reldpath)
+                symlink(reldpath, destpath, options.simulation)
+        else:
+            # regular file
+            if options.verbose:
+                print('regular file:', spath)
+            if not options.simulation:
+                if os.path.lexists(destpath):
+                    os.remove(destpath)
+                copy2(spath, destpath)

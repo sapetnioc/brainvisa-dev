@@ -1,0 +1,8 @@
+Package: @package_name@-dev
+Version: @package_version@
+Maintainer: @package_maintainer@
+Architecture: @architecture@
+Description: Test development package for component @package_name@
+Priority: optional
+Section: multiverse/science
+@DEB_DEPENDENCIES@

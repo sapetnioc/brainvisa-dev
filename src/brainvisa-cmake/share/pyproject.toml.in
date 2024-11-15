@@ -1,0 +1,30 @@
+# Specify sip v6 as the build system for the package.
+[build-system]
+requires = ["sip >=6, <7"]
+build-backend = "sipbuild.api"
+
+[tool.sip]
+# project-factory = 'pyproject.py'
+
+# Specify the PEP 566 metadata for the project.
+[tool.sip.metadata]
+name = "@SIP_MODULE_NAME@"
+
+# Specify each set of bindings.
+[tool.sip.bindings.@SIP_MAIN_SOURCE@]
+include-dirs= @PY_INCLUDE_DIRECTORIES@
+libraries = []
+library-dirs = ["@CMAKE_BINARY_DIR@/lib"]
+exceptions = true
+concatenate = @SIP_NUM_OUTPUT_FILES@
+tags = ["@SIP_QT_VERSION@"]
+
+# Configure the project itself.
+[tool.sip.project]
+## not working.
+abi-version = "@SIP_ABI@"
+sip-module = "@SIP_MODULE@"
+dunder-init = false
+target-dir = "@CMAKE_BINARY_DIR@/@PYTHON_INSTALL_DIRECTORY@"
+build-dir = "@CMAKE_CURRENT_BINARY_DIR@/sipbuild"
+sip-include-dirs = @PY_SIP_INCLUDE_DIRECTORIES@

@@ -1,0 +1,9 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+from __future__ import absolute_import
+
+from brainvisa_cmake import svn_to_git
+
+svn_to_git.main()
+
