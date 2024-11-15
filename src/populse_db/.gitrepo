@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/git-commands/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/populse/populse_db
+	branch = master
+	commit = e851ff8701f440282d17119b1eca49ad0e411314
+	parent = 5b0eec755cb4ace5afcbc37d21d4f4204c196cd3
+	method = merge
+	cmdver = 0.4.3

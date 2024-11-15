@@ -1,0 +1,53 @@
+environment:
+
+  matrix:
+    - APPVEYOR_BUILD_WORKER_IMAGE: Visual Studio 2022
+      PYTHON: "C:\\Python39-x64"
+
+    - APPVEYOR_BUILD_WORKER_IMAGE: Ubuntu2204
+      PYTHON: "$HOME/venv3.9"
+#      APPVEYOR_SSH_KEY:
+#      APPVEYOR_SSH_BLOCK: true
+
+    - APPVEYOR_BUILD_WORKER_IMAGE: macos-monterey
+      PYTHON: "~/venv3.9"
+
+build: off
+
+install:
+  - cmd: echo "     ** windows build **"
+  - sh: if [[ $(uname -s) == Linux ]]; then echo "     ** linux build **"; fi
+  - sh: if [[ $(uname -s) == Darwin ]]; then echo "     ** macos build **"; fi
+
+#  - sh: curl -sflL 'https://raw.githubusercontent.com/appveyor/ci/master/scripts/enable-ssh.sh' | bash -e -
+
+  - cmd: SET PATH=%PYTHON%;%PYTHON%\\Scripts;%PATH%
+  - sh: export PATH=~/venv3.9/bin:~/venv3.9/lib:$PATH
+
+  - python --version
+  - python -m pip install pip --upgrade
+  - pip -V
+  - pip install setuptools --upgrade
+  - pip install -e .[postgres]
+  - pip install codecov
+  - sh: if [[ $(uname -s) == Linux ]]; then pip install coverage[toml]; fi
+
+test_script:
+  - cmd: python -m populse_db.test -v
+  - sh: python ./python/populse_db/test.py -v
+  - sh: if [[ $(uname -s) == Linux ]]; then coverage run ./python/populse_db/test.py -v; fi
+  - sh: if [[ $(uname -s) == Linux ]]; then coverage xml; fi
+
+after_test:
+  #- sh: if [[ $(uname -s) == Linux ]]; then codecov; fi
+  - sh: if [[ $(uname -s) == Linux ]]; then curl -Os https://uploader.codecov.io/latest/linux/codecov; fi
+  - sh: if [[ $(uname -s) == Linux ]]; then chmod +x codecov; fi
+  - sh: if [[ $(uname -s) == Linux ]]; then ./codecov -f "coverage.xml" -t "b88bf18b-b29e-412e-96fe-e0f00832c173"; fi
+
+notifications:
+  - provider: Email
+    to:
+      - '{{commitAuthorEmail}}'
+    on_build_failure: true
+    on_build_success: false
+    on_build_status_changed: true
